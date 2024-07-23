@@ -12,6 +12,7 @@ class ImportService
     private array $tabs_to_models_map;
     private $model;
     private string $modelsPath;
+    private array $history = [];
 
     public function __construct()
     {
@@ -71,8 +72,9 @@ class ImportService
                 //dd(json_encode($data[$search_by_column_name]));
 
                 //Ищем запись в привязанной модели по полю из настроек
+                $model = $this->findOrCreate($className, $tab_map_data, $search_by_column_name, $table_row);
                 try {
-                    $model = $this->findOrCreate($className, $tab_map_data,  $search_by_column_name, $table_row);
+
                 }
                 catch (\Exception $e){
                     dump('Ошибка при обработке вкладки ' . $key);
@@ -96,18 +98,13 @@ class ImportService
     private function findOrCreate($className, $tab_map_data, $search_by_column_name, $table_row)
     {
         $data = $table_row->data;
+
         $data_to_create = [];
-       // dump( $tab_map_data['columns_to_fields']);
         foreach ($tab_map_data['columns_to_fields'] as $fields_data){
-            //            dump( $fields_data);
-            //            dump( $data);
-            //            dump( '---------');
 
             //Имеем дело с отнощениями в модели
             if(!empty($fields_data['model'])){
-                //                dump('!!!!!!!!!!');
-                //                dump($fields_data);
-                //                dump('!!!!!!!!!!');
+
                 //Ищем или создаём запись для привязки отнощения
                 try {
                     $model =  $this->findOrCreate(
@@ -126,18 +123,48 @@ class ImportService
 
                 $column = $model->id;
                 //Добавим данные по id для отношений в сырые данные, чтобы не менять логику заполнения массива данных для модели
-                //dump( $data);
                 $data[(string)$column] = $column;
-                //dump( $data);
-                //dump('================');
-                //                dd($model);
             }else{
                 $column = $fields_data['column_name'];
             }
 
+            //Вызов функции трансформирования
             $data_to_create[$fields_data['field']] = $fields_data['transform'] ? $fields_data['transform']($data[(string)$column]) : $data[(string)$column];
+
+
+
         }
 
+        //Обработка полей json (когда несколько колонок табл записываем в одно json поле)
+        //признак поля - разделяющая название поля точка
+        $data_to_implode = [];
+        foreach($data_to_create as $field_name => $field_value){
+            if(str_contains($field_name, '.')){
+                $field_name_mod = explode('.', $field_name);
+                $data_to_implode[$field_name_mod[0]][] = $field_value;
+                unset($data_to_create[$field_name]);
+            }
+        }
+
+        //dump($data_to_implode);
+
+        //мержим данные для json поля
+        foreach($data_to_implode as $dti_key => $dt_value){
+            $data_to_implode[$dti_key] = array_merge_recursive($dt_value[0],  $dt_value[1], (!empty($dt_value[2]) ? $dt_value[2] : []), (!empty($dt_value[2]) ? $dt_value[2] : []));
+
+            //Костыль для нормального объединения пар значений в отдельные под массивы
+            if(!empty($data_to_implode[$dti_key]['ru'])){
+                $data_to_implode[$dti_key]['ru'] = [array_merge_recursive($data_to_implode[$dti_key]['ru'][0], $data_to_implode[$dti_key]['ru'][1])];
+            }
+        }
+
+        dump($data_to_implode);
+        //echo '$data_to_create';
+        //dd( array_merge_recursive($data_to_create, $data_to_implode) );
+        //Объединяем данные для вставки с данными для объединения столбцов в json
+        $data_to_create = array_merge_recursive($data_to_create, $data_to_implode);
+
+        //Создание или обновление данных
         if ($className::whereJsonContains($tab_map_data['search_by_field'].'->ru', $data[$search_by_column_name] )->exists()) {
             //dump($className::first()?->name);
             //dump($className::first()?->doctor_speciality_name);
@@ -146,12 +173,25 @@ class ImportService
 
             //update
             $record = $className::whereJsonContains($tab_map_data['search_by_field'].'->ru', $data[$search_by_column_name] )->first();
+
+            //если есть данные для объединённых полей, то запрашиваем данные поля из таблицы для ""накопления
+            if(!empty($data_to_implode)){
+                //первая итерация записи с json полем - чистим его
+                if(empty($this->history[$className]) || !in_array($record->id, $this->history[$className])){
+                    //dd($record->prices);
+                    $record['prices'] = '{}';
+                    $record->save();
+                    $this->history[$className][]=$record->id;
+                }else{
+                    //Запись не старая - Объединяем предыдущую запись с новой
+                    $data_to_create['prices'] = array_merge_recursive( $record->prices, $data_to_create['prices']);
+                }
+            }
+
             $record->update($data_to_create);
             dump(['Данные для обновления', $data_to_create]);
             //$table_row->resource()->associate($record);
             $table_row->save();
-            //dump(['update  find=', $record]);
-            //dd($table_row);
         } else {
             //create
             dump(['Данные для вставки', $data_to_create]);
@@ -159,6 +199,8 @@ class ImportService
             //Добавляем отношения из настроек
             $table_row->resource()->attach($record);
             $table_row->save();
+//            echo 'CREATE';
+            $this->history[$className][]=$record->id;
         }
         //dump($tab_map_data);
 
@@ -217,8 +259,8 @@ class ImportService
     }
     public function import(): void
     {
-        $this->model::truncate();
-        $this->loadData();
+//        $this->model::truncate();
+//        $this->loadData();
         $this->data_to_models();
     }
 
