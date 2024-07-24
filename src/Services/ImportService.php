@@ -1,10 +1,7 @@
 <?php
 
 namespace Smile00112\SpreadsheetsDataImport\Services;
-use App\Models\Direction;
-use App\Models\User;
 use SheetDB\SheetDB;
-use voku\helper\ASCII;
 
 class ImportService
 {
@@ -30,7 +27,7 @@ class ImportService
             $data = $sheetdb->get();
 
             foreach ($data as $table_row){
-                $record = $this->model::create(
+                $this->model::create(
                     [
                         'data' => (array)$table_row,
                         'tab_name' => $key,
@@ -63,8 +60,8 @@ class ImportService
                 //Получаем название колонки из привязки её к полю из настроек
                 $search_by_column_name = $this->get_search_by_column_name($tab_map_data);
                 //Данные строки в таблице search_by_field
-                $data = $table_row->data;
-               // dd($data);
+                //$data = $table_row->data;
+                // dd($data);
                 if(!$search_by_column_name){
                     echo 'У закладки '.$key.' не найдена колонка для поля ' . $tab_map_data['search_by_field'] . ' | ';
                     continue;
@@ -72,9 +69,8 @@ class ImportService
                 //dd(json_encode($data[$search_by_column_name]));
 
                 //Ищем запись в привязанной модели по полю из настроек
-                $model = $this->findOrCreate($className, $tab_map_data, $search_by_column_name, $table_row);
                 try {
-
+                    $this->findOrCreate($className, $tab_map_data, $search_by_column_name, $table_row);
                 }
                 catch (\Exception $e){
                     dump('Ошибка при обработке вкладки ' . $key);
@@ -118,7 +114,6 @@ class ImportService
                     dump('Ошибка при создании/поиске записи для отношений V1:');
                     dump($e->getMessage());
                     dd($fields_data);
-                    continue;
                 }
 
                 $column = $model->id;
@@ -138,11 +133,13 @@ class ImportService
         //Обработка полей json (когда несколько колонок табл записываем в одно json поле)
         //признак поля - разделяющая название поля точка
         $data_to_implode = [];
+        $imploded_fields = [];
         foreach($data_to_create as $field_name => $field_value){
             if(str_contains($field_name, '.')){
                 $field_name_mod = explode('.', $field_name);
                 $data_to_implode[$field_name_mod[0]][] = $field_value;
                 unset($data_to_create[$field_name]);
+                $imploded_fields[$field_name_mod[0]] = $field_name_mod[0];
             }
         }
 
@@ -166,10 +163,6 @@ class ImportService
 
         //Создание или обновление данных
         if ($className::whereJsonContains($tab_map_data['search_by_field'].'->ru', $data[$search_by_column_name] )->exists()) {
-            //dump($className::first()?->name);
-            //dump($className::first()?->doctor_speciality_name);
-            //dump($className::whereJsonContains('name->ru', "Дермотология" )->get());
-            //dd('---------------');
 
             //update
             $record = $className::whereJsonContains($tab_map_data['search_by_field'].'->ru', $data[$search_by_column_name] )->first();
@@ -178,13 +171,19 @@ class ImportService
             if(!empty($data_to_implode)){
                 //первая итерация записи с json полем - чистим его
                 if(empty($this->history[$className]) || !in_array($record->id, $this->history[$className])){
-                    //dd($record->prices);
-                    $record['prices'] = '{}';
+                    foreach($imploded_fields as $impl_field){
+                        $record[$impl_field] = '{}';
+                    }
                     $record->save();
                     $this->history[$className][]=$record->id;
                 }else{
                     //Запись не старая - Объединяем предыдущую запись с новой
-                    $data_to_create['prices'] = array_merge_recursive( $record->prices, $data_to_create['prices']);
+                    foreach($imploded_fields as $impl_field){
+                        //Объединяем данные для json поля
+                        $data_to_create[$impl_field] = array_merge_recursive($record[$impl_field], $data_to_create[$impl_field]);
+                    }
+
+                    // $data_to_create['prices'] = array_merge_recursive( $record->prices, $data_to_create['prices']);
                 }
             }
 
@@ -207,60 +206,47 @@ class ImportService
         //Добавляем отношения из настроек
         dump('RELATIONS');
         if(!empty($tab_map_data['relations']))
-        foreach ($tab_map_data['relations'] as $relation){
+            foreach ($tab_map_data['relations'] as $relation){
 
-            //Если поле пустое, пропускаем
-            if(!$table_row->data[ $relation['column_name'] ]) {
-                dump('column_name Empty');
-                dump($relation);
-                dump($table_row->data);
-                dump('------------');
-                continue;
-            }
+                //Если поле пустое, пропускаем
+                if(!$table_row->data[ $relation['column_name'] ]) {
+                    dump('column_name Empty');
+                    dump($relation);
+                    dump($table_row->data);
+                    dump('------------');
+                    continue;
+                }
 
-            try {
-                $model_for_relation =  $this->findOrCreate(
-                    $this->modelsPath.$relation['model'],
-                    $relation,
-                    $this->get_search_by_column_name($relation),
-                    $table_row
-                );
-            }
-            catch (\Exception $e){
-                dump('Ошибка при создании/поиске записи для отношений V2:');
-                dump($e->getMessage());
-                dump($e->getLine());
-                dd($table_row?->data);
+                try {
+                    $model_for_relation =  $this->findOrCreate(
+                        $this->modelsPath.$relation['model'],
+                        $relation,
+                        $this->get_search_by_column_name($relation),
+                        $table_row
+                    );
+                }
+                catch (\Exception $e){
+                    dump('Ошибка при создании/поиске записи для отношений V2:');
+                    dump($e->getMessage());
+                    dump($e->getLine());
+                    dd($table_row?->data);
+                }
 
-                continue;
+                dump('Model associate');
+                if($relation['relation_func'] && $relation['relation_add_method']){
+                    if($relation['relation_add_method'] !== 'associate')
+                        $record->{$relation['relation_func']}()->detach($model_for_relation);
+                    $record->{$relation['relation_func']}()->{$relation['relation_add_method']}($model_for_relation);
+                    $record->save();
+                }
             }
-
-            dump('Model associate');
-            if($relation['relation_func'] && $relation['relation_add_method']){
-                $record->{$relation['relation_func']}()->detach($model_for_relation);
-                $record->{$relation['relation_func']}()->{$relation['relation_add_method']}($model_for_relation);
-                $record->save();
-            }
-            //dd($record);
-        }
-//        else
-//            dump('RELATIONS EMPTY');
 
         return  $record;
-
-
-        $model = $className::where($search_by_field)->first();
-        if(!$model){
-            $model = new $className;
-            $model->data = $data;
-            $model->save();
-        }
-        return $model;
     }
     public function import(): void
     {
-//        $this->model::truncate();
-//        $this->loadData();
+        $this->model::truncate();
+        $this->loadData();
         $this->data_to_models();
     }
 
